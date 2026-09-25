@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import logging
+import math
 import random
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ from dotenv import load_dotenv
 
 from .config import Settings
 from .generation_graph import GenerationGraphError, build_generation_graph
-from .invokeai import InvokeAIClient, InvokeAIError
+from .invokeai import InvokeAIClient
 from .ollama import OllamaClient, OllamaError
 
 log = logging.getLogger(__name__)
@@ -26,18 +27,34 @@ SUBJECTS = ("a forgotten moon temple", "a clockwork fox", "an underwater library
 STYLES = ("cinematic concept art", "dreamlike oil painting", "intricate ink illustration", "retro-futurist poster", "editorial photography", "luminous fantasy art")
 MOODS = ("at blue hour", "in warm volumetric light", "during a thunderstorm", "with an ethereal atmosphere", "under neon reflections", "surrounded by drifting petals")
 PACMAN_DOTS = 12
+PROGRESS_INTERVAL = 2  # seconds between progress-bar frames
+PROGRESS_EASING = 10  # frames; larger values make Pac-Man slow down later
 GHOST = "👻"
 GHOST_DISTANCE = 4  # cells between the ghost and Pac-Man (3 empty cells between them)
-GHOST_CHANCE = 0.1  # chance that a given lap across the bar has a ghost in pursuit
+GHOST_CHANCE = 0.1  # chance that a generation has a ghost in pursuit
 
 
 def random_prompt() -> str:
     return f"{random.choice(SUBJECTS)}, {random.choice(STYLES)}, {random.choice(MOODS)}, highly detailed"
 
 
-def pacman_frame(position: int, ghost: bool = False) -> str:
-    position %= PACMAN_DOTS + 1
-    pacman = "😐" if position % 2 == 0 else "😮"
+def progress_position(frame: int) -> int:
+    """Pac-Man's cell for a frame: quick at first, then ever slower.
+
+    The position eases towards the end of the bar without ever reaching the
+    last dot or moving backwards, so long generations never restart the bar.
+    """
+    if frame <= 0:
+        return 0
+    eased = PACMAN_DOTS * (1 - math.exp(-frame / PROGRESS_EASING))
+    return min(max(1, int(eased)), PACMAN_DOTS - 1)
+
+
+def pacman_frame(position: int, ghost: bool = False, mouth_open: bool | None = None) -> str:
+    position = min(max(position, 0), PACMAN_DOTS)
+    if mouth_open is None:
+        mouth_open = position % 2 == 1
+    pacman = "😮" if mouth_open else "😐"
     trail = " " * position
     ghost_at = position - GHOST_DISTANCE
     if ghost and ghost_at >= 0:
@@ -45,20 +62,22 @@ def pacman_frame(position: int, ghost: bool = False) -> str:
     return f"**Working…**\n`[{trail}{pacman}{'·' * (PACMAN_DOTS - position)}]`"
 
 
-def ghost_lap() -> bool:
+def progress_frame(frame: int, ghost: bool = False) -> str:
+    return pacman_frame(progress_position(frame), ghost, mouth_open=frame % 2 == 1)
+
+
+def ghost_chase() -> bool:
     return random.random() < GHOST_CHANCE
 
 
 async def animate_progress(message: discord.Message) -> None:
-    position = 1
-    ghost = ghost_lap()
+    frame = 1
+    ghost = ghost_chase()
     try:
         while True:
-            await asyncio.sleep(2)
-            await message.edit(content=pacman_frame(position, ghost))
-            position = (position + 1) % (PACMAN_DOTS + 1)
-            if position == 0:
-                ghost = ghost_lap()
+            await asyncio.sleep(PROGRESS_INTERVAL)
+            await message.edit(content=progress_frame(frame, ghost))
+            frame += 1
     except (discord.HTTPException, discord.NotFound):
         return
 
@@ -141,8 +160,11 @@ class InvokeBot(commands.Bot):
             return prompt
         try:
             enhanced = await self.ollama.enhance(prompt)
-        except OllamaError:
-            log.warning("Prompt enhancement failed; using the original prompt", exc_info=True)
+        except OllamaError as exc:
+            log.warning("Prompt enhancement failed; using the original prompt: %s", exc)
+            return prompt
+        except Exception:
+            log.exception("Unexpected prompt enhancement error; using the original prompt")
             return prompt
         log.info("Enhanced prompt %r -> %r", prompt, enhanced)
         return enhanced
@@ -334,7 +356,7 @@ class ResultView(discord.ui.View):
 
     async def regenerate(self, interaction: discord.Interaction, state: GenerationState) -> None:
         await interaction.response.defer()
-        message = await interaction.followup.send(content=pacman_frame(0), wait=True)
+        message = await interaction.followup.send(content=progress_frame(0), wait=True)
         animation = asyncio.create_task(animate_progress(message))
         try:
             embed, file = await self.bot.render(state)
@@ -418,7 +440,7 @@ def create_bot(settings: Settings) -> InvokeBot:
             int(defaults["steps"] if steps is None else steps),
             float(defaults["cfg_scale"] if cfg_scale is None else cfg_scale), extras,
         )
-        message = await interaction.edit_original_response(content=pacman_frame(0))
+        message = await interaction.edit_original_response(content=progress_frame(0))
         animation = asyncio.create_task(animate_progress(message))
         try:
             embed, file = await bot.render(state)

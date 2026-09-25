@@ -98,8 +98,13 @@ class OllamaClient:
                 data = await response.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise OllamaError(f"Cannot communicate with Ollama: {exc}") from exc
-        content = data.get("message", {}).get("content") if isinstance(data, dict) else None
-        enhanced = clean_enhanced_prompt(str(content or ""))
+        except ValueError as exc:
+            raise OllamaError("Ollama returned a response that is not JSON") from exc
+        message = data.get("message") if isinstance(data, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str):
+            raise OllamaError("Ollama returned a response without a message")
+        enhanced = clean_enhanced_prompt(content)
         if not enhanced:
             raise OllamaError("Ollama returned an empty prompt")
         return enhanced
