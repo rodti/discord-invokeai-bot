@@ -32,6 +32,20 @@ def _value(env_name: str, section: dict[str, object], key: str, default: object 
     return env_value if env_value not in (None, "") else section.get(key, default)
 
 
+def _boolean(name: str, value: object) -> bool:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        raw = value
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", "", "none", "null"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
 def _optional_text(value: object) -> str | None:
     if value is None:
         return None
@@ -50,6 +64,10 @@ class Settings:
     max_concurrent_jobs: int
     guild_id: int | None
     generation_defaults: dict[str, object]
+    ollama_enabled: bool = False
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str | None = None
+    ollama_timeout: float = 60
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -89,6 +107,11 @@ class Settings:
         configured_generation = _section(config, "generation")
         generation.update(configured_generation)
         _validate_generation(generation)
+        ollama_config = _section(config, "ollama")
+        ollama_enabled = _boolean("OLLAMA_ENABLED", ollama_config.get("enabled", False))
+        ollama_model = _optional_text(_value("OLLAMA_MODEL", ollama_config, "model", ""))
+        if ollama_enabled and not ollama_model:
+            raise ValueError("ollama.model is required when Ollama prompt enhancement is enabled")
         return cls(
             discord_token=token,
             invokeai_url=str(_value("INVOKEAI_URL", invoke_config, "url", "http://localhost:9090")).rstrip("/"),
@@ -99,6 +122,10 @@ class Settings:
             max_concurrent_jobs=_integer("MAX_CONCURRENT_JOBS", bot_config.get("max_concurrent_jobs", 2)),
             guild_id=int(guild) if guild else None,
             generation_defaults=generation,
+            ollama_enabled=ollama_enabled,
+            ollama_url=str(_value("OLLAMA_URL", ollama_config, "url", "http://localhost:11434")).rstrip("/"),
+            ollama_model=ollama_model,
+            ollama_timeout=_number("OLLAMA_TIMEOUT_SECONDS", ollama_config.get("timeout_seconds", 60)),
         )
 
 

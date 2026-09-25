@@ -8,6 +8,12 @@
     "token": null,
     "queue": "default"
   },
+  "ollama": {
+    "enabled": false,
+    "url": "http://localhost:11434",
+    "model": "llama3.1:8b",
+    "timeout_seconds": 60
+  },
   "bot": {
     "poll_interval_seconds": 1,
     "generation_timeout_seconds": 600,

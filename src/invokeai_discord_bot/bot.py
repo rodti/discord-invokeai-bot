@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from .config import Settings
 from .generation_graph import GenerationGraphError, build_generation_graph
 from .invokeai import InvokeAIClient, InvokeAIError
+from .ollama import OllamaClient, OllamaError
 
 log = logging.getLogger(__name__)
 
@@ -25,25 +26,39 @@ SUBJECTS = ("a forgotten moon temple", "a clockwork fox", "an underwater library
 STYLES = ("cinematic concept art", "dreamlike oil painting", "intricate ink illustration", "retro-futurist poster", "editorial photography", "luminous fantasy art")
 MOODS = ("at blue hour", "in warm volumetric light", "during a thunderstorm", "with an ethereal atmosphere", "under neon reflections", "surrounded by drifting petals")
 PACMAN_DOTS = 12
+GHOST = "👻"
+GHOST_DISTANCE = 4  # cells between the ghost and Pac-Man (3 empty cells between them)
+GHOST_CHANCE = 0.1  # chance that a given lap across the bar has a ghost in pursuit
 
 
 def random_prompt() -> str:
     return f"{random.choice(SUBJECTS)}, {random.choice(STYLES)}, {random.choice(MOODS)}, highly detailed"
 
 
-def pacman_frame(position: int) -> str:
+def pacman_frame(position: int, ghost: bool = False) -> str:
     position %= PACMAN_DOTS + 1
     pacman = "😐" if position % 2 == 0 else "😮"
-    return f"**Working…**\n`[{' ' * position}{pacman}{'·' * (PACMAN_DOTS - position)}]`"
+    trail = " " * position
+    ghost_at = position - GHOST_DISTANCE
+    if ghost and ghost_at >= 0:
+        trail = trail[:ghost_at] + GHOST + trail[ghost_at + 1:]
+    return f"**Working…**\n`[{trail}{pacman}{'·' * (PACMAN_DOTS - position)}]`"
+
+
+def ghost_lap() -> bool:
+    return random.random() < GHOST_CHANCE
 
 
 async def animate_progress(message: discord.Message) -> None:
     position = 1
+    ghost = ghost_lap()
     try:
         while True:
             await asyncio.sleep(2)
-            await message.edit(content=pacman_frame(position))
+            await message.edit(content=pacman_frame(position, ghost))
             position = (position + 1) % (PACMAN_DOTS + 1)
+            if position == 0:
+                ghost = ghost_lap()
     except (discord.HTTPException, discord.NotFound):
         return
 
@@ -96,6 +111,11 @@ class InvokeBot(commands.Bot):
         self.settings = settings
         self.invoke = InvokeAIClient(settings.invokeai_url, settings.invokeai_token, settings.queue)
         self.jobs = asyncio.Semaphore(settings.max_concurrent_jobs)
+        self.ollama = (
+            OllamaClient(settings.ollama_url, settings.ollama_model, settings.ollama_timeout)
+            if settings.ollama_enabled and settings.ollama_model
+            else None
+        )
 
     async def setup_hook(self) -> None:
         if self.settings.guild_id:
@@ -107,11 +127,30 @@ class InvokeBot(commands.Bot):
 
     async def close(self) -> None:
         await self.invoke.close()
+        if self.ollama is not None:
+            await self.ollama.close()
         await super().close()
+
+    async def generation_prompt(self, prompt: str) -> str:
+        """Return the prompt sent to InvokeAI, enhanced by Ollama when enabled.
+
+        The enhanced text is never shown in Discord; on any Ollama failure the
+        original prompt is used so generation still goes ahead.
+        """
+        if self.ollama is None:
+            return prompt
+        try:
+            enhanced = await self.ollama.enhance(prompt)
+        except OllamaError:
+            log.warning("Prompt enhancement failed; using the original prompt", exc_info=True)
+            return prompt
+        log.info("Enhanced prompt %r -> %r", prompt, enhanced)
+        return enhanced
 
     async def render(self, state: GenerationState) -> tuple[discord.Embed, discord.File]:
         model = await self.invoke.resolve_model(state.extras.get("model"))
         values = state.graph_values()
+        values["prompt"] = await self.generation_prompt(state.prompt)
         for name in ("t5_encoder", "clip_encoder", "text_encoder", "vae"):
             if values.get(name) not in (None, ""):
                 values[name] = await self.invoke.resolve_model(values[name], main_only=False)

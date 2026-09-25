@@ -22,3 +22,25 @@ def test_generation_state_can_be_copied_without_mutating_original():
     branch.extras["sampler"] = "ddim"
     assert original.prompt == "first"
     assert original.extras["sampler"] == "euler"
+
+
+def test_ghost_follows_pacman_at_a_distance():
+    from invokeai_discord_bot.bot import GHOST, GHOST_DISTANCE
+
+    frame = pacman_frame(8, ghost=True)
+    bar = frame.split("`")[1]
+    assert bar.index("😐") - bar.index(GHOST) == GHOST_DISTANCE
+    assert len(pacman_frame(8, ghost=True)) == len(pacman_frame(8))
+
+
+def test_ghost_is_off_screen_until_pacman_has_a_head_start():
+    from invokeai_discord_bot.bot import GHOST, GHOST_DISTANCE
+
+    assert GHOST not in pacman_frame(GHOST_DISTANCE - 1, ghost=True)
+    assert GHOST in pacman_frame(GHOST_DISTANCE, ghost=True)
+
+
+def test_no_ghost_by_default():
+    from invokeai_discord_bot.bot import GHOST
+
+    assert all(GHOST not in pacman_frame(i) for i in range(13))
